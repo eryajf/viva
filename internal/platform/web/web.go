@@ -13,7 +13,6 @@ import (
 	"unicode/utf8"
 	"unsafe"
 
-	"github.com/vivaui/viva/internal/bidi"
 	"github.com/vivaui/viva/internal/input"
 	"github.com/vivaui/viva/internal/platform"
 	"github.com/vivaui/viva/ui"
@@ -53,8 +52,10 @@ type runtime struct {
 	a11y      *accessibilityMirror
 	dpr       float32
 	pending   bool
-	baselines func(fontSize float32) baselineMetrics
+	metrics   *textMetrics
 	measurer  *domMeasurer
+	clock     frameClock
+	paths     pathCache
 }
 
 // Run mounts the application into the document and returns when the page
@@ -73,6 +74,7 @@ func Run(config Config) error {
 	if runtime.dpr <= 0 {
 		runtime.dpr = 1
 	}
+	runtime.clock = newFrameClock()
 	runtime.mount()
 	runtime.bindEvents()
 	defer runtime.bindWaker()()
@@ -138,7 +140,13 @@ func (runtime *runtime) mount() {
 	}
 	runtime.measurer = newDOMMeasurer(runtime.document)
 	runtime.canvas.SetTextEngine(newLineEngine(runtime.measurer))
-	runtime.baselines = platformBaselines()
+	// A font that loads late changes the baselines and widths as it does every line.
+	clearLines := runtime.measurer.invalidate
+	runtime.measurer.setInvalidate(func() {
+		clearLines()
+		runtime.metrics.clear()
+	})
+	runtime.metrics = newTextMetrics(runtime.measurer)
 	runtime.painter = newPainter(runtime.canvas, &runtime.config)
 	runtime.resize()
 }
@@ -173,106 +181,6 @@ func (runtime *runtime) requestFrame() {
 		runtime.render()
 		return nil
 	}))
-}
-
-// render repaints the canvas vocabulary into the 2D context.
-func (runtime *runtime) render() {
-	context := runtime.context
-	if runtime.painter.dirty {
-		runtime.painter.dirty = false
-		runtime.a11y.sync(runtime.painter.accessibility, runtime.painter.focused)
-		id, input := runtime.painter.activeTextInput()
-		runtime.a11y.text.sync(id, input, runtime.textInputChanged)
-	}
-	context.Call("save")
-	context.Call("scale", runtime.dpr, runtime.dpr)
-	context.Set("fillStyle", cssColor(runtime.painter.clear))
-	context.Call("fillRect", 0, 0, runtime.painter.width, runtime.painter.height)
-
-	for _, layer := range runtime.painter.layers {
-		// A shadow is painted where it was among the rectangles of its layer.
-		shadows := runtime.painter.shadows
-		drawShadowsBefore := func(rectangles int) {
-			for len(shadows) > 0 && int(shadows[0].RectsBefore) <= rectangles {
-				if shadow := shadows[0]; shadow.Layer == layer {
-					drawShadow(context, shadow, runtime.dpr)
-				}
-				shadows = shadows[1:]
-			}
-		}
-		for number, rectangle := range runtime.painter.rectangles {
-			if rectangle.Layer != layer {
-				continue
-			}
-			drawShadowsBefore(number)
-			if rectangle.HasClip {
-				context.Call("save")
-				clipRect(context, rectangle.ClipOf)
-			}
-			context.Set("fillStyle", cssColor(rectangle.Color))
-			if rectangle.Radius > 0 {
-				traceRoundedRect(context, rectangle.Bounds, rectangle.Radius)
-				context.Call("fill")
-			} else {
-				context.Call("fillRect", rectangle.Bounds.X, rectangle.Bounds.Y, rectangle.Bounds.Width, rectangle.Bounds.Height)
-			}
-			if rectangle.HasClip {
-				context.Call("restore")
-			}
-		}
-		drawShadowsBefore(len(runtime.painter.rectangles))
-		for _, triangle := range runtime.painter.triangles {
-			if triangle.Layer != layer {
-				continue
-			}
-			if triangle.HasClip {
-				context.Call("save")
-				clipRect(context, triangle.ClipOf)
-			}
-			context.Set("fillStyle", triangleFill(context, triangle))
-			context.Call("beginPath")
-			context.Call("moveTo", triangle.Points[0].X, triangle.Points[0].Y)
-			context.Call("lineTo", triangle.Points[1].X, triangle.Points[1].Y)
-			context.Call("lineTo", triangle.Points[2].X, triangle.Points[2].Y)
-			context.Call("closePath")
-			context.Call("fill")
-			if triangle.HasClip {
-				context.Call("restore")
-			}
-		}
-		for _, text := range runtime.painter.texts {
-			if text.Layer != layer {
-				continue
-			}
-			if text.RunCount > 0 {
-				runtime.drawRuns(text)
-				continue
-			}
-			context.Call("save")
-			if text.HasClip {
-				clipRect(context, text.ClipOf)
-			}
-			clipRect(context, text.Bounds)
-			context.Set("fillStyle", cssColor(text.Style.Color))
-			context.Set("font", cssFont(text.Style.Size, text.Style.Weight))
-			metrics := runtime.baselines(text.Style.Size)
-			baseline := (text.Bounds.Height-metrics.Ascent-metrics.Descent)*0.5 + metrics.Ascent
-			context.Set("textBaseline", "alphabetic")
-			// The line is drawn whole, in the font and direction the text engine measured it
-			// with. The base direction of a right-to-left paragraph puts the
-			// punctuation around it on the side the paragraph puts it.
-			y := text.Bounds.Y + baseline
-			context.Set("textAlign", "left")
-			if bidi.BaseDirection(text.Value) == bidi.RTL {
-				context.Set("direction", "rtl")
-			} else {
-				context.Set("direction", "ltr")
-			}
-			context.Call("fillText", text.Value, text.Bounds.X, y)
-			context.Call("restore")
-		}
-	}
-	context.Call("restore")
 }
 
 // drawRuns draws a fixed-pitch grid line: each run at its cell, in its own

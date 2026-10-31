@@ -411,6 +411,7 @@ extern int vivaShortcutEvent(
 // length bytes; the result is nonzero when the point takes files.
 extern void vivaOpenURL(const char *url);
 extern int vivaApplicationQuitRequested(void);
+extern int vivaApplicationReopenRequested(void);
 extern int vivaFileDropEvent(
     uintptr_t handle,
     void *view,
@@ -5034,6 +5035,9 @@ static void viva_reset_profile_counters(void) {
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)flag {
     (void)sender;
     (void)flag;
+    if (vivaApplicationReopenRequested()) {
+        return NO;
+    }
     for (VivaAppDelegate *delegate in viva_application_windows) {
         if (![delegate isPanel] && ([delegate isHidden] || [delegate isMiniaturized])) {
             [delegate reopenWindow];

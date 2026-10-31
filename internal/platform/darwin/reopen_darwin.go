@@ -1,0 +1,27 @@
+//go:build darwin
+
+package darwin
+
+import "sync"
+
+var applicationReopen struct {
+	sync.Mutex
+	handler func()
+}
+
+func (application *nativeApplication) SetReopenHandler(handler func()) {
+	applicationReopen.Lock()
+	applicationReopen.handler = handler
+	applicationReopen.Unlock()
+}
+
+func deliverApplicationReopen() bool {
+	applicationReopen.Lock()
+	handler := applicationReopen.handler
+	applicationReopen.Unlock()
+	if handler == nil {
+		return false
+	}
+	handler()
+	return true
+}

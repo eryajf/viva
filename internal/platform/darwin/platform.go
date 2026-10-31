@@ -216,6 +216,7 @@ func RunApplication(start platform.ApplicationStart) error {
 	}
 	application := &nativeApplication{}
 	defer application.SetQuitRequestHandler(nil)
+	defer application.SetReopenHandler(nil)
 	if err := start(application); err != nil {
 		C.viva_application_close_all()
 		if application.windows > 0 {

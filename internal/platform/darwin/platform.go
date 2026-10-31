@@ -694,12 +694,14 @@ func makeNativeTextLabels(labels []TextLabel) (unsafe.Pointer, []unsafe.Pointer,
 			bitmap_stride:  C.uint32_t(max(label.BitmapStride, 0)),
 			bitmap_id:      C.uint64_t(label.BitmapID),
 			bitmap_version: C.uint32_t(label.BitmapVersion),
+			reserved1:      C.uint32_t(boolInt(label.BitmapUpload)),
 			clip_x:         C.float(label.Clip.X),
-			clip_y:         C.float(label.Clip.Y),
-			clip_width:     C.float(label.Clip.Width),
-			clip_height:    C.float(label.Clip.Height),
-			origin_x:       C.float(label.OriginX),
-			origin_y:       C.float(label.OriginY),
+
+			clip_y:      C.float(label.Clip.Y),
+			clip_width:  C.float(label.Clip.Width),
+			clip_height: C.float(label.Clip.Height),
+			origin_x:    C.float(label.OriginX),
+			origin_y:    C.float(label.OriginY),
 		}
 		validCount++
 	}

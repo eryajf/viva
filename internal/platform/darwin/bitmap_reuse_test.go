@@ -65,3 +65,27 @@ func TestRetainedBitmapSurvivesSceneAndAnimationChanges(t *testing.T) {
 		render(t, bitmap, false, 38, 14, 0, 255, 0)
 	})
 }
+
+func TestBitmapDownsampleAveragesSourcePixels(t *testing.T) {
+	offscreen, err := NewOffscreen(8, 8, 1, Color{Alpha: 1})
+	if err != nil {
+		t.Skipf("no Metal device: %v", err)
+	}
+	defer offscreen.Close()
+	label := TextLabel{
+		X: 2, Y: 2, Width: 1, Height: 1,
+		Bitmap: []byte{0, 0, 255, 255, 0, 255, 0, 255}, BitmapWidth: 2, BitmapHeight: 1, BitmapStride: 8,
+		BitmapID: 72, BitmapVersion: 1, BitmapUpload: true,
+	}
+	if err := offscreen.Set(nil, []TextLabel{label}, nil); err != nil {
+		t.Fatal(err)
+	}
+	pixels, width, _, err := offscreen.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blue, green, red, alpha := pixelAt(pixels, width, 2, 2)
+	if alpha < 240 || red < 90 || green < 90 || blue > 80 {
+		t.Fatalf("downsampled pixel = BGRA %d,%d,%d,%d, want an averaged red/green pixel", blue, green, red, alpha)
+	}
+}

@@ -15,13 +15,18 @@ func (application *nativeApplication) SetReopenHandler(handler func()) {
 	applicationReopen.Unlock()
 }
 
-func deliverApplicationReopen() bool {
+func deliverApplicationReopen() (handled bool) {
 	applicationReopen.Lock()
 	handler := applicationReopen.handler
 	applicationReopen.Unlock()
 	if handler == nil {
 		return false
 	}
+	defer func() {
+		if recover() != nil {
+			handled = false
+		}
+	}()
 	handler()
 	return true
 }

@@ -1640,6 +1640,48 @@ static uint64_t viva_label_content_hash(viva_text_label config) {
 - (NSRect)frame;
 @end
 
+static NSData *viva_downsample_bitmap(NSData *source, uint32_t sourceWidth, uint32_t sourceHeight, uint32_t sourceStride, size_t width, size_t height) {
+    if (source == nil || width == 0 || height == 0 || width > sourceWidth || height > sourceHeight || sourceStride < sourceWidth * 4) {
+        return nil;
+    }
+    if (sourceHeight - 1 > SIZE_MAX / sourceStride || source.length < (size_t)(sourceHeight - 1) * sourceStride + (size_t)sourceWidth * 4 || width > SIZE_MAX / 4 || height > SIZE_MAX / (width * 4)) {
+        return nil;
+    }
+    size_t rowBytes = width * 4;
+    NSMutableData *pixels = [[NSMutableData alloc] initWithLength:height * rowBytes];
+    if (pixels == nil) {
+        return nil;
+    }
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGDataProviderRef provider = CGDataProviderCreateWithData(NULL, source.bytes, source.length, NULL);
+    CGImageRef image = provider == NULL ? NULL : CGImageCreate(
+        sourceWidth, sourceHeight, 8, 32, sourceStride, colorSpace,
+        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
+        provider, NULL, true, kCGRenderingIntentDefault);
+    CGContextRef context = image == NULL ? NULL : CGBitmapContextCreate(
+        pixels.mutableBytes, width, height, 8, rowBytes, colorSpace,
+        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+    if (context != NULL) {
+        CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
+        CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
+    }
+    if (context != NULL) {
+        CGContextRelease(context);
+    }
+    if (image != NULL) {
+        CGImageRelease(image);
+    }
+    if (provider != NULL) {
+        CGDataProviderRelease(provider);
+    }
+    CGColorSpaceRelease(colorSpace);
+    if (context == NULL) {
+        [pixels release];
+        return nil;
+    }
+    return pixels;
+}
+
 @implementation VivaTextLayer
 
 - (instancetype)initWithConfig:(viva_text_label)config {
@@ -1751,7 +1793,7 @@ static uint64_t viva_label_content_hash(viva_text_label config) {
             _bitmapVersion != config.bitmap_version || _bitmap.length != config.bitmap_length) {
             return NO;
         }
-        if (_bitmapID == 0 && memcmp(_bitmap.bytes, config.bitmap, config.bitmap_length) != 0) {
+        if (config.reserved1 != 0 && (config.bitmap == NULL || memcmp(_bitmap.bytes, config.bitmap, config.bitmap_length) != 0)) {
             return NO;
         }
     }
@@ -1804,19 +1846,38 @@ static uint64_t viva_label_content_hash(viva_text_label config) {
             _bitmap.length < (size_t)(_bitmapHeight - 1) * _bitmapStride + (size_t)_bitmapWidth * 4) {
             return NO;
         }
+        CGFloat pixelScale = MAX(scale, 1.0);
+        size_t shownWidth = (size_t)MAX(1.0, floor((_frame.origin.x + _frame.size.width) * pixelScale + 0.5) - floor(_frame.origin.x * pixelScale + 0.5));
+        size_t shownHeight = (size_t)MAX(1.0, floor((_frame.origin.y + _frame.size.height) * pixelScale + 0.5) - floor(_frame.origin.y * pixelScale + 0.5));
+        size_t uploadWidth = _bitmapWidth, uploadHeight = _bitmapHeight;
+        NSData *uploadData = _bitmap;
+        uint32_t uploadStride = _bitmapStride;
+        if (shownWidth <= _bitmapWidth && shownHeight <= _bitmapHeight && (shownWidth < _bitmapWidth || shownHeight < _bitmapHeight)) {
+            NSData *reduced = viva_downsample_bitmap(_bitmap, _bitmapWidth, _bitmapHeight, _bitmapStride, shownWidth, shownHeight);
+            if (reduced == nil) {
+                return NO;
+            }
+            uploadData = reduced;
+            uploadWidth = shownWidth;
+            uploadHeight = shownHeight;
+            uploadStride = (uint32_t)(shownWidth * 4);
+        }
         MTLTextureDescriptor *descriptor = [MTLTextureDescriptor
             texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                         width:_bitmapWidth
-                                        height:_bitmapHeight
+                                         width:uploadWidth
+                                        height:uploadHeight
                                      mipmapped:NO];
         descriptor.storageMode = MTLStorageModeShared;
         descriptor.usage = MTLTextureUsageShaderRead;
         id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
         if (texture != nil) {
-            [texture replaceRegion:MTLRegionMake2D(0, 0, _bitmapWidth, _bitmapHeight)
+            [texture replaceRegion:MTLRegionMake2D(0, 0, uploadWidth, uploadHeight)
                        mipmapLevel:0
-                         withBytes:_bitmap.bytes
-                       bytesPerRow:_bitmapStride];
+                         withBytes:uploadData.bytes
+                       bytesPerRow:uploadStride];
+        }
+        if (uploadData != _bitmap) {
+            [uploadData release];
         }
         if (texture == nil) {
             return NO;
@@ -2738,7 +2799,7 @@ static void viva_encode_scene(
         _metalLayer.framebufferOnly = YES;
         /* A transparent clear color must reach the desktop through a frameless
          * surface. Opaque titled windows keep the normal fast path. */
-        _metalLayer.opaque = clearColor.alpha >= 1.0;
+        _metalLayer.opaque = clearColor.alpha >= 1.0 && windowMode != VIVA_WINDOW_PANEL;
         _metalLayer.maximumDrawableCount = 2;
         _metalLayer.allowsNextDrawableTimeout = YES;
 
@@ -4526,11 +4587,19 @@ static void viva_set_secure_event_input(BOOL on) {
         _window.hasShadow = YES;
     } else if (_windowMode == VIVA_WINDOW_CUSTOM_TITLEBAR) {
         _window.minSize = NSMakeSize(320, 200);
+        if (_clearColor.alpha < 1.0) {
+            _window.backgroundColor = [NSColor clearColor];
+            _window.opaque = NO;
+        }
         _window.titlebarAppearsTransparent = YES;
         _window.titleVisibility = NSWindowTitleHidden;
         _window.movableByWindowBackground = NO;
     } else {
         _window.minSize = NSMakeSize(320, 200);
+        if (_clearColor.alpha < 1.0) {
+            _window.backgroundColor = [NSColor clearColor];
+            _window.opaque = NO;
+        }
     }
 
     VivaMetalView *view = [[VivaMetalView alloc] initWithFrame:frame

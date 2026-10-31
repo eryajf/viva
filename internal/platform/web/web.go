@@ -15,6 +15,7 @@ import (
 
 	"github.com/vivaui/viva/internal/bidi"
 	"github.com/vivaui/viva/internal/input"
+	"github.com/vivaui/viva/internal/platform"
 	"github.com/vivaui/viva/ui"
 )
 
@@ -32,6 +33,12 @@ type Config struct {
 	// use, so an embedding page can scroll instead.
 	ForwardWheel func(deltaX, deltaY float32)
 	TextInput    TextInputProvider
+	// Canvas is the retained canvas the runtime paints into; nil makes a fresh one.
+	Canvas *ui.Canvas
+	// Waker, when set, is bound for the life of the page: waking it runs OnWake
+	// and then repaints, so background work can ask for a frame from any goroutine.
+	Waker  *platform.Waker
+	OnWake func()
 }
 
 type runtime struct {
@@ -68,6 +75,7 @@ func Run(config Config) error {
 	}
 	runtime.mount()
 	runtime.bindEvents()
+	defer runtime.bindWaker()()
 	runtime.requestFrame()
 	// Yield once through the microtask queue so the initial rAF callback can
 	// run before the blocking select parks the main goroutine.
@@ -124,7 +132,10 @@ func (runtime *runtime) mount() {
 	runtime.context = surface.Call("getContext", "2d")
 	runtime.a11y = newAccessibilityMirror(runtime.document, focusRoot, accessibilityLayer, runtime.config.Title)
 
-	runtime.canvas = &ui.Canvas{}
+	runtime.canvas = runtime.config.Canvas
+	if runtime.canvas == nil {
+		runtime.canvas = &ui.Canvas{}
+	}
 	runtime.measurer = newDOMMeasurer(runtime.document)
 	runtime.canvas.SetTextEngine(newLineEngine(runtime.measurer))
 	runtime.baselines = platformBaselines()

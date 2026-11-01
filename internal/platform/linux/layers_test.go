@@ -34,11 +34,11 @@ func TestBitmapCacheResizesWithoutRecreatingImage(t *testing.T) {
 	}
 	next := label
 	next.X, next.Y, next.Width, next.Height, next.Layer = 20, 30, 40, 24, 3
-	if labelContentChanged(label, next) {
+	if textureContentChanged(label, next) {
 		t.Fatal("resizing bitmap quad would discard its source image")
 	}
 	next.BitmapVersion++
-	if !labelContentChanged(label, next) {
+	if !textureContentChanged(label, next) {
 		t.Fatal("bitmap content change did not invalidate its source image")
 	}
 }

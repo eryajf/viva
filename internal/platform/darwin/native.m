@@ -2141,6 +2141,8 @@ static uint64_t viva_label_content_hash(viva_text_label config) {
     CGFloat _blue;
     CGFloat _alpha;
     CGFloat _lastScale;
+    size_t _textureWidth;
+    size_t _textureHeight;
     CGFloat _originX;  // where the text starts within the frame, logical pixels
     CGFloat _originY;
     uint64_t _hash;
@@ -2217,6 +2219,29 @@ static NSData *viva_downsample_bitmap(NSData *source, uint32_t sourceWidth, uint
     return pixels;
 }
 
+// viva_bitmap_texture_extent is the size of the texture an image label is drawn from: the
+// stored image, averaged down to the device pixels the label covers when it is drawn smaller
+// than it is stored. internal/platform.BitmapTextureExtent computes the same size.
+static void viva_bitmap_texture_extent(NSRect frame, CGFloat scale, size_t sourceWidth, size_t sourceHeight, size_t *width, size_t *height) {
+    CGFloat pixelScale = MAX(scale, 1.0);
+    size_t shownWidth = (size_t)MAX(1.0, floor((frame.origin.x + frame.size.width) * pixelScale + 0.5) - floor(frame.origin.x * pixelScale + 0.5));
+    size_t shownHeight = (size_t)MAX(1.0, floor((frame.origin.y + frame.size.height) * pixelScale + 0.5) - floor(frame.origin.y * pixelScale + 0.5));
+    *width = sourceWidth;
+    *height = sourceHeight;
+    if (shownWidth <= sourceWidth && shownHeight <= sourceHeight && (shownWidth < sourceWidth || shownHeight < sourceHeight)) {
+        *width = shownWidth;
+        *height = shownHeight;
+    }
+}
+
+// viva_bitmap_extent_stale reports whether a texture of one dimension no longer suits an image
+// that needs another: smaller than needed would blur it, and more than twice as large would
+// alias it. Between those the texture stays, so an animated size does not rebuild every frame.
+// internal/platform.BitmapTextureStale applies the same rule.
+static BOOL viva_bitmap_extent_stale(size_t have, size_t need) {
+    return need > have || have >= 2 * need;
+}
+
 @implementation VivaTextLayer
 
 - (instancetype)initWithConfig:(viva_text_label)config {
@@ -2263,7 +2288,13 @@ static NSData *viva_downsample_bitmap(NSData *source, uint32_t sourceWidth, uint
             _runCount = config.run_count;
             _utf8 = [[NSData alloc] initWithBytes:config.utf8 length:config.utf8_length];
         }
-        if ((config.flags & VIVA_LABEL_BITMAP) != 0 && config.bitmap != NULL) {
+        if ((config.flags & VIVA_LABEL_BITMAP) != 0) {
+            // An image the Go side did not send has nothing to draw from: fail the update
+            // rather than keep a layer that renders blank.
+            if (config.bitmap == NULL) {
+                [self release];
+                return nil;
+            }
             _bitmap = [[NSData alloc] initWithBytes:config.bitmap length:config.bitmap_length];
             _bitmapWidth = config.bitmap_width;
             _bitmapHeight = config.bitmap_height;
@@ -2328,7 +2359,7 @@ static NSData *viva_downsample_bitmap(NSData *source, uint32_t sourceWidth, uint
             _bitmapVersion != config.bitmap_version || _bitmap.length != config.bitmap_length) {
             return NO;
         }
-        if (config.reserved1 != 0 && (config.bitmap == NULL || memcmp(_bitmap.bytes, config.bitmap, config.bitmap_length) != 0)) {
+        if (config.bitmap_upload != 0 && (config.bitmap == NULL || memcmp(_bitmap.bytes, config.bitmap, config.bitmap_length) != 0)) {
             return NO;
         }
     }
@@ -2372,7 +2403,13 @@ static NSData *viva_downsample_bitmap(NSData *source, uint32_t sourceWidth, uint
 }
 
 - (BOOL)rebuildWithDevice:(id<MTLDevice>)device scale:(CGFloat)scale {
-    if (_texture != nil && (_bitmap != nil || _lastScale == scale)) {
+    size_t wantWidth = 0, wantHeight = 0;
+    if (_bitmap != nil) {
+        viva_bitmap_texture_extent(_frame, scale, _bitmapWidth, _bitmapHeight, &wantWidth, &wantHeight);
+    }
+    if (_texture != nil && (_bitmap != nil
+            ? !viva_bitmap_extent_stale(_textureWidth, wantWidth) && !viva_bitmap_extent_stale(_textureHeight, wantHeight)
+            : _lastScale == scale)) {
         return YES;
     }
     if (_bitmap != nil) {
@@ -2381,21 +2418,18 @@ static NSData *viva_downsample_bitmap(NSData *source, uint32_t sourceWidth, uint
             _bitmap.length < (size_t)(_bitmapHeight - 1) * _bitmapStride + (size_t)_bitmapWidth * 4) {
             return NO;
         }
-        CGFloat pixelScale = MAX(scale, 1.0);
-        size_t shownWidth = (size_t)MAX(1.0, floor((_frame.origin.x + _frame.size.width) * pixelScale + 0.5) - floor(_frame.origin.x * pixelScale + 0.5));
-        size_t shownHeight = (size_t)MAX(1.0, floor((_frame.origin.y + _frame.size.height) * pixelScale + 0.5) - floor(_frame.origin.y * pixelScale + 0.5));
         size_t uploadWidth = _bitmapWidth, uploadHeight = _bitmapHeight;
         NSData *uploadData = _bitmap;
         uint32_t uploadStride = _bitmapStride;
-        if (shownWidth <= _bitmapWidth && shownHeight <= _bitmapHeight && (shownWidth < _bitmapWidth || shownHeight < _bitmapHeight)) {
-            NSData *reduced = viva_downsample_bitmap(_bitmap, _bitmapWidth, _bitmapHeight, _bitmapStride, shownWidth, shownHeight);
+        if (wantWidth != _bitmapWidth || wantHeight != _bitmapHeight) {
+            NSData *reduced = viva_downsample_bitmap(_bitmap, _bitmapWidth, _bitmapHeight, _bitmapStride, wantWidth, wantHeight);
             if (reduced == nil) {
                 return NO;
             }
             uploadData = reduced;
-            uploadWidth = shownWidth;
-            uploadHeight = shownHeight;
-            uploadStride = (uint32_t)(shownWidth * 4);
+            uploadWidth = wantWidth;
+            uploadHeight = wantHeight;
+            uploadStride = (uint32_t)(wantWidth * 4);
         }
         MTLTextureDescriptor *descriptor = [MTLTextureDescriptor
             texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
@@ -2419,6 +2453,8 @@ static NSData *viva_downsample_bitmap(NSData *source, uint32_t sourceWidth, uint
         }
         [_texture release];
         _texture = texture;
+        _textureWidth = uploadWidth;
+        _textureHeight = uploadHeight;
         _lastScale = scale;
         return YES;
     }
@@ -2729,6 +2765,12 @@ static int viva_update_label_layers(
                 labels[index].x, labels[index].y,
                 labels[index].width, labels[index].height)];
             [existing updateClipFromConfig:labels[index]];
+            // An image drawn at a new size may need a texture of another resolution.
+            if ((labels[index].flags & VIVA_LABEL_BITMAP) != 0 && ![existing rebuildWithDevice:device scale:scale]) {
+                free(source);
+                [replacement release];
+                return 3;
+            }
             [replacement addObject:existing];
             continue;
         }

@@ -89,3 +89,50 @@ func TestBitmapDownsampleAveragesSourcePixels(t *testing.T) {
 		t.Fatalf("downsampled pixel = BGRA %d,%d,%d,%d, want an averaged red/green pixel", blue, green, red, alpha)
 	}
 }
+
+// An image first drawn small and then drawn at its stored size must be drawn from the stored
+// pixels, not from the small texture stretched back up.
+func TestRetainedBitmapRegainsResolutionWhenDrawnLarger(t *testing.T) {
+	offscreen, err := NewOffscreen(8, 8, 1, Color{Alpha: 1})
+	if err != nil {
+		t.Skipf("no Metal device: %v", err)
+	}
+	defer offscreen.Close()
+	var source []byte // left half red, right half blue, BGRA
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			if x < 4 {
+				source = append(source, 0, 0, 255, 255)
+			} else {
+				source = append(source, 255, 0, 0, 255)
+			}
+		}
+	}
+	label := TextLabel{
+		Width: 2, Height: 2,
+		Bitmap: source, BitmapWidth: 8, BitmapHeight: 8, BitmapStride: 32,
+		BitmapID: 73, BitmapVersion: 1, BitmapUpload: true,
+	}
+	set := func() {
+		t.Helper()
+		if err := offscreen.Set(nil, []TextLabel{label}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set()
+	label.Width, label.Height, label.BitmapUpload = 8, 8, false
+	set()
+	pixels, width, _, err := offscreen.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, edge := range []struct {
+		x         int
+		blue, red byte
+	}{{3, 0, 255}, {4, 255, 0}} {
+		blue, green, red, _ := pixelAt(pixels, width, edge.x, 4)
+		if blue != edge.blue || green != 0 || red != edge.red {
+			t.Errorf("pixel %d beside the edge = BGR %d,%d,%d, want %d,0,%d", edge.x, blue, green, red, edge.blue, edge.red)
+		}
+	}
+}

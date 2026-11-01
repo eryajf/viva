@@ -2,7 +2,11 @@
 
 package darwin
 
-import "sync"
+import (
+	"fmt"
+	"os"
+	"sync"
+)
 
 var applicationReopen struct {
 	sync.Mutex
@@ -23,7 +27,9 @@ func deliverApplicationReopen() (handled bool) {
 		return false
 	}
 	defer func() {
-		if recover() != nil {
+		if value := recover(); value != nil {
+			// The native handling still runs, but the application's bug is not hidden.
+			fmt.Fprintf(os.Stderr, "viva: reopen handler panicked: %v\n", value)
 			handled = false
 		}
 	}()

@@ -295,12 +295,44 @@ func OpenURL(target string) error {
 	return nil
 }
 
+// SchemeHandlerAvailable reports whether an application is registered for a URL
+// scheme such as "vscode", as the system's open would route it.
+func SchemeHandlerAvailable(scheme string) (bool, error) {
+	nativeScheme, err := systemCString("URL scheme", scheme)
+	if err != nil {
+		return false, err
+	}
+	defer C.free(unsafe.Pointer(nativeScheme))
+	var nativeError *C.char
+	status := C.viva_system_scheme_handler(nativeScheme, &nativeError)
+	if status < 0 {
+		return false, systemError("look up URL scheme handler", nativeError)
+	}
+	return status == 1, nil
+}
+
 func PlaySystemSound(sound uint8) error {
 	var nativeError *C.char
 	if C.viva_system_play_sound(C.uint8_t(sound), &nativeError) != 0 {
 		return systemError("play system sound", nativeError)
 	}
 	return nil
+}
+
+// ShowFatalError shows a modal alert. It needs the main thread and does nothing
+// on any other.
+func ShowFatalError(title, message string) {
+	nativeTitle, err := systemCString("alert title", title)
+	if err != nil {
+		return
+	}
+	defer C.free(unsafe.Pointer(nativeTitle))
+	nativeMessage, err := systemCString("alert message", message)
+	if err != nil {
+		return
+	}
+	defer C.free(unsafe.Pointer(nativeMessage))
+	C.viva_system_show_fatal_error(nativeTitle, nativeMessage)
 }
 
 func SendNotification(title, body string) error {

@@ -189,11 +189,12 @@ func TextDirectionOf(value string) TextDirection {
 	return DirectionLTR
 }
 
-// MonoFace chooses one system-provided fixed-pitch family. The zero value is
+// MonoFace chooses a system-provided fixed-pitch font. The zero value is
 // the platform's modern system mono. MonoClassic requests a traditional
 // terminal face and falls back to MonoSystem when unavailable. Higher values
-// are installed families named by MonoFamily.
-type MonoFace uint8
+// are installed families named by MonoFamily, with the families that draw
+// what they lack when made by MonoStack.
+type MonoFace uint16
 
 const (
 	MonoSystem MonoFace = iota
@@ -206,6 +207,10 @@ const (
 // split before every character that is not ASCII, so each such character sits
 // on its own cell; a run holding a single character is centered within its
 // Cells. Decorations are drawn across the run's whole cell span.
+//
+// Block Elements (U+2580 to U+259F: halves, eighths, quadrants, shades) are not drawn from
+// a font: the renderer fills their exact fraction of the cell, so neighbouring cells meet
+// without a seam; see BlockRectangles.
 //
 // Ligatures asks the fixed-pitch renderer to shape the run as one line instead
 // of placing one glyph per cell, so a font's programming ligatures appear. The
@@ -263,6 +268,11 @@ type Image struct {
 	// Backdrop marks an image drawn beneath every other primitive of the frame,
 	// whatever layer they are on. See Canvas.DrawBackdrop.
 	Backdrop bool
+	// DevicePixels marks an image whose Bounds and Source are whole device pixels
+	// and whole bitmap pixels, drawn one bitmap pixel to one device pixel. The
+	// painter keeps it so, at a fractional display scale too, instead of rounding
+	// it to logical pixels. See Surface.DrawPixels.
+	DevicePixels bool
 }
 
 // Role describes the platform-neutral semantic purpose of an interactive hit.
@@ -525,6 +535,7 @@ type Canvas struct {
 	triangles     []Triangle
 	shadows       []Shadow
 	images        []Image
+	nativeViews   []NativeView
 	texts         []Text
 	runs          []TextRun
 	hits          []Hit
@@ -534,7 +545,13 @@ type Canvas struct {
 	pathPoints    []Point
 	contourEnds   []int32
 	contourClosed []bool
-	pathBuilder   PathBuilder
+	// iconPartCenters is where each contour of an icon in motion turns and grows,
+	// rebuilt from the icon's own contour count on every painted frame.
+	iconPartCenters []Point
+	// iconContours holds the contours of an icon whose parts move, so a moving
+	// glyph does not allocate the slice on every frame.
+	iconContours []Icon
+	pathBuilder  PathBuilder
 	// gradientSource holds the flat triangles a path gradient recolors.
 	gradientSource []Triangle
 	// path and triangulation scratch survives Reset: reused every paint.
@@ -692,6 +709,7 @@ func (canvas *Canvas) Reset() {
 	canvas.triangles = canvas.triangles[:0]
 	canvas.shadows = canvas.shadows[:0]
 	canvas.images = canvas.images[:0]
+	canvas.nativeViews = canvas.nativeViews[:0]
 	canvas.texts = canvas.texts[:0]
 	canvas.runs = canvas.runs[:0]
 	canvas.hits = canvas.hits[:0]
@@ -701,6 +719,8 @@ func (canvas *Canvas) Reset() {
 	canvas.pathPoints = canvas.pathPoints[:0]
 	canvas.contourEnds = canvas.contourEnds[:0]
 	canvas.contourClosed = canvas.contourClosed[:0]
+	canvas.iconPartCenters = canvas.iconPartCenters[:0]
+	canvas.iconContours = canvas.iconContours[:0]
 	canvas.motion.open = canvas.motion.open[:0]
 	canvas.trappedScope = ID{}
 	canvas.escapeTarget = ID{}
@@ -725,6 +745,7 @@ func (canvas *Canvas) Trim() {
 	canvas.triangles = trimCapacity(canvas.triangles)
 	canvas.shadows = trimCapacity(canvas.shadows)
 	canvas.images = trimCapacity(canvas.images)
+	canvas.nativeViews = trimCapacity(canvas.nativeViews)
 	canvas.texts = trimCapacity(canvas.texts)
 	canvas.runs = trimCapacity(canvas.runs)
 	canvas.hits = trimCapacity(canvas.hits)

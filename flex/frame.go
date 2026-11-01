@@ -47,6 +47,7 @@ const (
 	kindSpinner
 	kindSplitter
 	kindSlider
+	kindImage
 )
 
 type direction uint8
@@ -170,17 +171,18 @@ const (
 // hit options of an interactive container, an icon, the hover fill, the border's
 // color and the shadow's level.
 type extra struct {
-	hit         ui.HitOptions
-	icon        ui.Icon
-	hover       ui.Color
-	border      ui.Color
-	shadow      ui.ShadowLevel
-	scrollState *ScrollState // the state a ScrollArea reports its extent to
-	maxPct      [2]float32   // MaxWidthPercent and MaxHeightPercent; zero is none
-	hitOut      [4]float32   // how far the hit region reaches beyond the rectangle: top, right, bottom, left
-	edges       [4]float32   // an absolute element's distance from its container's top, right, bottom, left
-	within      ui.Rect      // what a Popup is kept inside, when not the frame; empty for the frame
-	moves       bool         // the element's rectangle moves a custom-titlebar window (MovesWindow)
+	hit           ui.HitOptions
+	icon          ui.Icon
+	iconTransform ui.IconTransform // moves the icon inside its box without moving the box
+	hover         ui.Color
+	border        ui.Color
+	shadow        ui.ShadowLevel
+	scrollState   *ScrollState // the state a ScrollArea reports its extent to
+	maxPct        [2]float32   // MaxWidthPercent and MaxHeightPercent; zero is none
+	hitOut        [4]float32   // how far the hit region reaches beyond the rectangle: top, right, bottom, left
+	edges         [4]float32   // an absolute element's distance from its container's top, right, bottom, left
+	within        ui.Rect      // what a Popup is kept inside, when not the frame; empty for the frame
+	moves         bool         // the element's rectangle moves a custom-titlebar window (MovesWindow)
 }
 
 // Frame is one page being declared. It is handed to the function given to
@@ -194,8 +196,10 @@ type Frame struct {
 	textareas  []components.TextareaSnapshot
 	segmented  []segmented
 	choices    []components.SegmentOption // the options Choice builds, shared by the frame
+	images     []ui.Bitmap                // what each Image element draws, indexed by its aux
 	exts       []extra                    // exts[0] is never written: an element without extras points at it
 	floats     []int32                    // the Popups, which belong to no container
+	popupLayer uint16                     // the canvas layer the Popups are painted on
 	lines      []string
 	widgets    widgets            // Table, Tabs, Select, Dialog and Splitter declarations
 	ellipses   []ui.EllipsisCache // the cut-off ends of wrapped texts, kept between frames
@@ -229,7 +233,9 @@ func (view *View) Begin(canvas *ui.Canvas, theme ui.Theme, bounds ui.Rect) *Fram
 	f.lines = f.lines[:0]
 	f.exts = append(f.exts[:0], extra{})
 	f.inputs, f.groups, f.textareas, f.segmented, f.choices = f.inputs[:0], f.groups[:0], f.textareas[:0], f.segmented[:0], f.choices[:0]
+	f.images = f.images[:0]
 	f.floats = f.floats[:0]
+	f.popupLayer = 0
 	f.scratch.reset()
 	f.widgets.reset()
 	f.scrolls.epoch++
@@ -269,8 +275,14 @@ func (f *Frame) End() {
 	f.scrolls.sweep()
 	f.reportSplitters()
 	f.paint(0)
+	if f.popupLayer != 0 {
+		f.canvas.PushLayer(f.popupLayer)
+	}
 	for _, index := range f.floats {
 		f.paint(index)
+	}
+	if f.popupLayer != 0 {
+		f.canvas.PopLayer()
 	}
 	f.trim()
 }
@@ -294,6 +306,7 @@ func (f *Frame) trim() {
 	f.textareas = trimFlexCapacity(f.textareas)
 	f.segmented = trimFlexCapacity(f.segmented)
 	f.choices = trimFlexCapacity(f.choices)
+	f.images = trimFlexCapacity(f.images)
 	f.exts = trimFlexCapacity(f.exts)
 	f.floats = trimFlexCapacity(f.floats)
 	f.lines = trimFlexCapacity(f.lines)
@@ -367,6 +380,11 @@ func (f *Frame) Popup() Box {
 	f.floats = append(f.floats, b.i)
 	return b
 }
+
+// PopupLayer paints the page's popups on a canvas layer of their own instead of the page's. A
+// native view (Canvas.NativeView) hides what is painted on its layer and below, so popups that
+// must stand over one go on a higher layer than the view's.
+func (f *Frame) PopupLayer(layer uint16) { f.popupLayer = layer }
 
 // Grid opens a container that lays its children in equal cells, as many columns
 // as fit when each is at least minCell wide, wrapping onto new rows; Gap is the
@@ -444,6 +462,18 @@ func (f *Frame) Icon(icon ui.Icon) Box {
 	n := &f.nodes[b.i]
 	f.extra(b.i).icon = icon
 	n.color = f.theme.Foreground
+	return b
+}
+
+// Image adds a bitmap, 16 pixels square unless given a size, scaled to fill the
+// element's rectangle. It is the way to show a picture the application draws or
+// asks the system for, such as app.FileIcon, among text and icons; the bitmap
+// is not copied, so its pixels must stay unchanged while the page is on screen
+// (see ui.Bitmap). An empty or invalid bitmap leaves the room blank.
+func (f *Frame) Image(bitmap ui.Bitmap) Box {
+	b := f.box(kindImage)
+	f.nodes[b.i].aux = int32(len(f.images))
+	f.images = append(f.images, bitmap)
 	return b
 }
 

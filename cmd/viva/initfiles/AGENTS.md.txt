@@ -49,7 +49,7 @@ m.view.Draw(canvas, theme, bounds, func(f *flex.Frame) {
 - Containers: `Row` (left to right), `Column` (top to bottom), `Stack` (on top of each
   other), `Grid(minCell)` (as many equal columns as fit), `Scroll(offset)` (a clipped
   column taller than itself). Leaves: `Text`, `Paragraph`, `Wrap`, `Spacer`, `Divider`, `Icon`,
-  `Button`, `Checkbox`, `Switch`, `Slot`, `Progress(fraction)` (a bar; `.Indeterminate()` for unknown length),
+  `Image(bitmap)` (a `ui.Bitmap` such as `app.FileIcon` returns, 16 px square unless sized), `Button`, `Checkbox`, `Switch`, `Slot`, `Progress(fraction)` (a bar; `.Indeterminate()` for unknown length),
   `Spinner()`, `Splitter(id, &state)` (see Keys, drag and the mouse), `Slider(id, &state)` (a number picker, see below).
 - Size: nothing = as big as its content; `Width`, `Height`, `Size` fix it; `FillWidth`,
   `FillHeight`, `Fill` take the room; `Grow(n)` shares free room along the container;
@@ -66,6 +66,14 @@ m.view.Draw(canvas, theme, bounds, func(f *flex.Frame) {
   `Justify(flex.Center|End|Between)` places what is left along it; `Center()` does both.
 - Look: `Background`, `HoverBackground`, `Radius`, `Border(width, color)`, `Shadow(ui.ShadowMD)` (a drop shadow under the fill; `ShadowXS` to `ShadowLG`), `Clip`. A circle (an avatar, a dot) is a
   square box with `Radius(size/2)` and `Center()`: `f.Row().Size(32, 32).Radius(16).Background(c).Center().Children(func() { f.Text("AB") })`.
+- Icons move inside their box, not the box: `f.Icon(glyph).IconTransform(ui.IconTransform{Rotate: radians, Scale: 0.9, Offset: ui.Point{X: 2, Y: 0}})`
+  turns and scales the glyph about the center of its box and moves it after that, while the row keeps its place, its
+  size and its hit region. The zero `ui.IconTransform` is the still icon, and a frame that passes one costs nothing.
+- A glyph's parts move on their own: `glyph.Contours()` splits the glyph into one icon per contour, and
+  `IconTransform.Parts` takes one `ui.IconPart` per contour that moves (`Contour: n`, `Offset: ui.Point{Y: 2}`), so
+  that contour moves while the others stay. Contours are numbered in drawing order, so a regenerated glyph can renumber
+  them; pin the contours you address with a test that paints the part and checks where it lands. Filled `Layers` are
+  not contours: they paint once, unchanged, while parts move.
 - Window: in a `WindowCustomTitlebar` window nothing moves the window unless you say where: `f.Row().Height(36).MovesWindow().Children(...)` on the top bar
   (controls inside it still take their own clicks; a menu or dialog open over it is dismissed by a click there and the window moves once the pointer drags).
 - Text: `FontSize`, `Weight`, `Bold`, `Color`, `Muted`, `Mono`, `MonoFace`, `TextCenter`, `TextEnd`, `TextDirection`, `LineHeight`;
@@ -156,6 +164,14 @@ m.view.Draw(canvas, theme, bounds, func(f *flex.Frame) {
   (`BesideLeftBox`) on the left. The requested side is used; if it does not fit, the side with more room;
   `Start|Center|End` aligns across (shifted, never flipped); then it is moved the least that keeps it inside the
   frame. `Within(rect)` keeps it inside rect instead. A menu that may be long needs a `MaxHeight` and a `ScrollArea`.
+- A page of the system's web engine inside the window (WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows):
+  put an `app.WebHost` in `Config.Web`, open the page in its `OnReady` (`host.Open(app.WebViewConfig{URL: ...})`, or `HTML`
+  with a `Scheme` that serves your own resources), keep the `*app.WebView`, and in `Paint` reserve its room with a `Slot()`
+  and declare it with `canvas.NativeView(page.ID(), slot.Rect())` after `f.End()`. Everything painted on the view's layer or
+  below is hidden by it; a menu or tooltip that must stand over it goes on a higher layer: `f.PopupLayer(1)` for `f.Popup()`s.
+  The page talks to the app with `window.viva.postMessage(text)` / `viva.onmessage`, and the app with `OnMessage` and
+  `page.PostMessage(text)`. Calls on the host and the page run on the window thread. `Open` fails with `app.ErrUnsupported`
+  when the platform or the installed engine cannot host pages: show something else then.
 - Grid children can cover several cells: `.ColSpan(n)` and `.RowSpan(n)` (columns are equal; the next child goes in
   the first free cell after the previous one, skipping cells a span has taken).
 - Take a child out of the flow with `.Absolute()` and place it by edges in its container: `.Top(8).Right(8)`
@@ -255,7 +271,9 @@ Nothing runs by itself. A paint that must be followed by another (a progress bar
 window goes idle again. `canvas.Now()` is the animation clock (a `time.Duration`): store `began := canvas.Now()` when
 the thing starts and derive the state from `canvas.Now()-began` in Paint, never from a ticker or goroutine.
 `canvas.Animate(id, slot, target, ui.DefaultMotion())` eases a value toward a target for you (hover fades, sliding
-indicators).
+indicators). Ask it for `ui.EaseLinear` and it becomes a clock for a motion with keyframes of your own, each segment
+eased by `ui.CubicBezier(x1, y1, x2, y2)` (the CSS curve): a press that turns an icon and settles it back is one click,
+one slot and one map of stop times.
 
 ```go
 if m.running {

@@ -109,6 +109,8 @@ func (host nativeHost) AddStatusItem(config StatusItemConfig) (StatusItemControl
 	return nativeStatusItem{item}, nil
 }
 
+func (host nativeHost) SetDockBadge(text string) { host.native.SetDockBadge(text) }
+
 func (host nativeHost) Quit() { host.native.Quit() }
 
 type nativeStatusItem struct{ item platform.StatusItem }

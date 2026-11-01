@@ -72,6 +72,9 @@ type painter struct {
 	lastTexts       []ui.Text
 	lastRuns        []ui.TextRun // the runs lastTexts refer to, copied out of the application's memory
 	lastImages      []ui.Image
+	views           []platform.NativeView // the native views of this publish
+	lastViews       []platform.NativeView // the ones last sent
+	covers          []ui.Rect             // backing of the views' Covers
 	stateBySlot     []instanceState
 	// layerShift is 1 while the frame has a backdrop, which takes platform layer
 	// zero; every canvas layer then travels one higher. It is 0 otherwise.
@@ -100,7 +103,8 @@ type painter struct {
 	clipped            []ui.Rectangle
 	clippedPaths       []ui.Triangle
 	clippedSoft        []ui.Shadow
-	order              []shapeRef // clipped, clippedPaths and clippedSoft interleaved in paint order
+	order              []shapeRef     // clipped, clippedPaths and clippedSoft interleaved in paint order
+	blocks             []ui.Rectangle // scratch for appendBlockElements
 	clippedTexts       []ui.Text
 	clippedImages      []ui.Image
 	// controls draws the window buttons of a custom titlebar, on platforms where
@@ -827,6 +831,10 @@ func (painter *painter) publish() (platform.Frame, error) {
 		frame.TextLabels = painter.labels
 	}
 
+	if views, changed := painter.syncNativeViews(); changed {
+		frame.NativeViews = views
+	}
+
 	regionsUnchanged := painter.hitStructuresUnchanged()
 	if regionsUnchanged {
 		painter.reusedHits++
@@ -856,6 +864,63 @@ func (painter *painter) publish() (platform.Frame, error) {
 	// peak does not become the application's permanent footprint.
 	painter.trim()
 	return frame, nil
+}
+
+// syncNativeViews works out where the native views are this frame, inside their clips, and
+// reports them when they differ from the ones the platform has. The slice is never nil, so a frame
+// that took the last view away is told from one that says nothing.
+func (painter *painter) syncNativeViews() ([]platform.NativeView, bool) {
+	painter.views = painter.views[:0]
+	painter.covers = painter.covers[:0]
+	for _, view := range painter.canvas.NativeViews() {
+		bounds := view.Bounds
+		if view.HasClip {
+			left, top := max(bounds.X, view.ClipOf.X), max(bounds.Y, view.ClipOf.Y)
+			right := min(bounds.X+bounds.Width, view.ClipOf.X+view.ClipOf.Width)
+			bottom := min(bounds.Y+bounds.Height, view.ClipOf.Y+view.ClipOf.Height)
+			if right <= left || bottom <= top {
+				continue
+			}
+			bounds = ui.Rect{X: left, Y: top, Width: right - left, Height: bottom - top}
+		}
+		native := platform.NativeView{ID: uint32(view.ID), Bounds: bounds, Layer: painter.platformLayer(view.Layer)}
+		start := len(painter.covers)
+		painter.covers = painter.coversOf(view.Layer, bounds, painter.covers)
+		native.Covers = painter.covers[start:len(painter.covers):len(painter.covers)]
+		painter.views = append(painter.views, native)
+	}
+	if slices.EqualFunc(painter.views, painter.lastViews, sameNativeView) {
+		return nil, false
+	}
+	if painter.views == nil {
+		painter.views = []platform.NativeView{}
+	}
+	painter.lastViews = painter.lastViews[:0]
+	for _, view := range painter.views {
+		view.Covers = slices.Clone(view.Covers)
+		painter.lastViews = append(painter.lastViews, view)
+	}
+	return painter.views, true
+}
+
+// coversOf lists the hit regions on layers above a view that lie over it, cut to it.
+func (painter *painter) coversOf(layer uint16, bounds ui.Rect, into []ui.Rect) []ui.Rect {
+	for _, hit := range painter.canvas.Hits() {
+		if hit.Layer <= layer {
+			continue
+		}
+		left, top := max(bounds.X, hit.Bounds.X), max(bounds.Y, hit.Bounds.Y)
+		right := min(bounds.X+bounds.Width, hit.Bounds.X+hit.Bounds.Width)
+		bottom := min(bounds.Y+bounds.Height, hit.Bounds.Y+hit.Bounds.Height)
+		if right > left && bottom > top {
+			into = append(into, ui.Rect{X: left, Y: top, Width: right - left, Height: bottom - top})
+		}
+	}
+	return into
+}
+
+func sameNativeView(a, b platform.NativeView) bool {
+	return a.ID == b.ID && a.Bounds == b.Bounds && a.Layer == b.Layer && slices.Equal(a.Covers, b.Covers)
 }
 
 // trim gives back the backing arrays of the painter's per-frame buffers when
@@ -895,6 +960,7 @@ func (painter *painter) trim() {
 	painter.clippedPaths = trimPainterCapacity(painter.clippedPaths)
 	painter.clippedSoft = trimPainterCapacity(painter.clippedSoft)
 	painter.order = trimPainterCapacity(painter.order)
+	painter.blocks = trimPainterCapacity(painter.blocks)
 	painter.clippedTexts = trimPainterCapacity(painter.clippedTexts)
 	painter.clippedImages = trimPainterCapacity(painter.clippedImages)
 	painter.accessibility = trimPainterCapacity(painter.accessibility)
@@ -1257,12 +1323,14 @@ func (painter *painter) applyClipping() {
 		if roundPixel(text.Bounds.Width) <= 0 || roundPixel(text.Bounds.Height) <= 0 || text.Style.Size <= 0 {
 			continue
 		}
-		if !text.HasClip {
-			painter.clippedTexts = append(painter.clippedTexts, text)
-			continue
+		if text.HasClip {
+			if _, visible := intersectVisible(text.Bounds, text.ClipOf); !visible {
+				continue
+			}
 		}
-		if _, visible := intersectVisible(text.Bounds, text.ClipOf); visible {
-			painter.clippedTexts = append(painter.clippedTexts, text)
+		painter.clippedTexts = append(painter.clippedTexts, text)
+		if text.RunCount > 0 {
+			painter.appendBlockElements(text)
 		}
 	}
 	painter.layerShift = 0
@@ -1283,6 +1351,13 @@ func (painter *painter) applyClipping() {
 		if !ok {
 			continue
 		}
+		if image.DevicePixels {
+			// The clip may end between device pixels; the picture is cut at one.
+			scale := painter.canvas.PixelScale()
+			if visible = deviceBounds(visible, scale); visible.Width <= 0 || visible.Height <= 0 {
+				continue
+			}
+		}
 		if visible != image.Bounds {
 			sx := image.Source.Width / image.Bounds.Width
 			sy := image.Source.Height / image.Bounds.Height
@@ -1291,8 +1366,28 @@ func (painter *painter) applyClipping() {
 			image.Source.Width = visible.Width * sx
 			image.Source.Height = visible.Height * sy
 			image.Bounds = visible
+			if image.DevicePixels {
+				image.Source = wholePixels(image.Source)
+			}
 		}
 		painter.clippedImages = append(painter.clippedImages, image)
+	}
+}
+
+// appendBlockElements paints the Block Elements of a fixed-pitch line as rectangles after
+// the canvas's own, as the line's text is drawn after them (see ui.Canvas.BlockRectangles).
+func (painter *painter) appendBlockElements(text ui.Text) {
+	painter.blocks = painter.canvas.BlockRectangles(painter.blocks[:0], text)
+	for _, rectangle := range painter.blocks {
+		if rectangle.HasClip {
+			visible, cut := clipVisibility(rectangle.Bounds, rectangle.ClipOf)
+			if !visible {
+				continue
+			}
+			rectangle.HasClip = cut
+		}
+		painter.order = append(painter.order, shapeRef{index: int32(len(painter.clipped))})
+		painter.clipped = append(painter.clipped, rectangle)
 	}
 }
 
@@ -1903,8 +1998,8 @@ func (painter *painter) syncLabels() {
 		bitmap := image.Bitmap
 		left := max(int(image.Source.X), 0)
 		top := max(int(image.Source.Y), 0)
-		right := min(int(image.Source.X+image.Source.Width+0.999999), bitmap.Width)
-		bottom := min(int(image.Source.Y+image.Source.Height+0.999999), bitmap.Height)
+		right := min(int(math.Ceil(float64(image.Source.X+image.Source.Width))), bitmap.Width)
+		bottom := min(int(math.Ceil(float64(image.Source.Y+image.Source.Height))), bitmap.Height)
 		if left >= right || top >= bottom {
 			continue
 		}
@@ -1922,9 +2017,14 @@ func (painter *painter) syncLabels() {
 		if image.Backdrop {
 			layer = 0
 		}
+		// Rounded to logical pixels, unless the image is laid out in device pixels.
+		x, y, w, h := float32(roundPixel(image.Bounds.X)), float32(roundPixel(image.Bounds.Y)), float32(width), float32(height)
+		if image.DevicePixels {
+			x, y, w, h = image.Bounds.X, image.Bounds.Y, image.Bounds.Width, image.Bounds.Height
+		}
 		painter.labels = append(painter.labels, platform.TextLabel{
-			X: float32(roundPixel(image.Bounds.X)), Y: float32(roundPixel(image.Bounds.Y)),
-			Width: float32(width), Height: float32(height),
+			X: x, Y: y,
+			Width: w, Height: h,
 			Layer:  layer,
 			Bitmap: bitmap.Pix[offset : offset+length], BitmapWidth: right - left, BitmapHeight: bottom - top,
 			BitmapStride: bitmap.Stride, BitmapID: bitmap.ID, BitmapVersion: bitmap.Version,
@@ -1952,12 +2052,31 @@ func (painter *painter) syncLabels() {
 			Layer: painter.platformLayer(label.Layer),
 			Mono:  label.Style.Mono, MonoFace: label.Style.MonoFace, CellWidth: label.CellWidth, Runs: painter.canvas.TextRuns(label),
 		}
+		if label.RunCount > 0 {
+			// The font does not draw Block Elements; appendBlockElements did.
+			entry.Value, entry.Runs = ui.ReplaceBlockElements(entry.Value, entry.Runs)
+		}
 		if label.HasClip && !containsRect(label.ClipOf, label.Bounds) {
 			// The clip cuts the label partway: the renderers scissor to it.
 			entry.Clip, entry.Clipped = label.ClipOf, true
 		}
 		painter.labels = append(painter.labels, entry)
 	}
+}
+
+// deviceBounds rounds the edges of bounds to whole device pixels of scale.
+func deviceBounds(bounds ui.Rect, scale float32) ui.Rect {
+	edge := func(value float32) float32 { return float32(math.Floor(float64(value)*float64(scale) + 0.5)) }
+	left, top := edge(bounds.X), edge(bounds.Y)
+	right, bottom := edge(bounds.X+bounds.Width), edge(bounds.Y+bounds.Height)
+	return ui.Rect{X: left / scale, Y: top / scale, Width: (right - left) / scale, Height: (bottom - top) / scale}
+}
+
+// wholePixels rounds the edges of a bitmap region to whole bitmap pixels.
+func wholePixels(region ui.Rect) ui.Rect {
+	left, top := math.Floor(float64(region.X)+0.5), math.Floor(float64(region.Y)+0.5)
+	right, bottom := math.Floor(float64(region.X+region.Width)+0.5), math.Floor(float64(region.Y+region.Height)+0.5)
+	return ui.Rect{X: float32(left), Y: float32(top), Width: float32(right - left), Height: float32(bottom - top)}
 }
 
 // containsRect reports whether inner lies wholly inside outer.

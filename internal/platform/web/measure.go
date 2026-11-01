@@ -10,27 +10,6 @@ import (
 	"github.com/vivaui/viva/ui"
 )
 
-// platformBaselines returns the browser font's ascent and descent at a size, so label
-// baselines match the native CoreText formula. Widths, carets and hit-testing come from
-// the text engine (textengine_js.go).
-func platformBaselines() func(fontSize float32) baselineMetrics {
-	document := js.Global().Get("document")
-	offscreen := document.Call("createElement", "canvas")
-	context := offscreen.Call("getContext", "2d")
-
-	return func(fontSize float32) baselineMetrics {
-		context.Set("font", cssFont(fontSize, 0))
-		metrics := context.Call("measureText", "Ag")
-		ascent := float32(metrics.Get("fontBoundingBoxAscent").Float())
-		descent := float32(metrics.Get("fontBoundingBoxDescent").Float())
-		if ascent <= 0 {
-			ascent = float32(metrics.Get("actualBoundingBoxAscent").Float())
-			descent = float32(metrics.Get("actualBoundingBoxDescent").Float())
-		}
-		return baselineMetrics{Ascent: ascent, Descent: descent}
-	}
-}
-
 func cssFont(fontSize, weight float32) string {
 	cssWeight := 400
 	switch {
@@ -66,13 +45,33 @@ func cssMonoFont(fontSize, weight float32, italic bool, face ui.MonoFace) string
 	if italic {
 		slant = "italic "
 	}
-	family := "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-	if name := ui.MonoFamilyName(face); name != "" {
-		family = cssFamily(name) + ", monospace"
-	} else if face == ui.MonoClassic {
-		family = "'Courier New', Courier, monospace"
+	return fmt.Sprintf("%s%d %gpx %s", slant, cssWeight, fontSize, cssMonoFamilies(face))
+}
+
+// cssMonoFamilies is the font-family list of a face: its primary font, then the
+// families that draw what the primary lacks, then the generic ones.
+func cssMonoFamilies(face ui.MonoFace) string {
+	var list strings.Builder
+	switch name := ui.MonoFamilyName(face); {
+	case name != "":
+		list.WriteString(cssFamily(name))
+		list.WriteString(", ")
+	case ui.MonoIsClassic(face):
+		list.WriteString("'Courier New', Courier, ")
 	}
-	return fmt.Sprintf("%s%d %gpx %s", slant, cssWeight, fontSize, family)
+	for _, fallback := range ui.MonoFallbacks(face) {
+		list.WriteString(cssFamily(fallback))
+		list.WriteString(", ")
+	}
+	switch {
+	case ui.MonoFamilyName(face) != "":
+		list.WriteString("monospace")
+	case ui.MonoIsClassic(face):
+		list.WriteString("monospace")
+	default:
+		list.WriteString("ui-monospace, SFMono-Regular, Menlo, Consolas, monospace")
+	}
+	return list.String()
 }
 
 // monoBaseline reports the fixed-pitch font's ascent and descent at a size.

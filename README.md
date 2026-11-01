@@ -11,7 +11,9 @@ Viva is a Go-first, GPU-native desktop framework. Applications draw through
 the platform's own window and GPU APIs — Cocoa and Metal, Win32 and Direct3D 11,
 XCB and Vulkan — with no WebView, no browser engine, and no bundled runtime. It
 is aimed at small binaries, low idle resource usage, and direct access to native
-platform capabilities.
+platform capabilities. An application that needs web content can host the
+system's own web view beside Viva's drawing (WebKitGTK, WKWebView, WebView2): it
+is opt-in, loaded when the first page opens, and nothing is bundled.
 
 The status list below is what runs today.
 
@@ -48,7 +50,7 @@ Viva reaches Cocoa and Metal through cgo; on Linux, X11 with the system XCB and
 Vulkan loaders; on Windows, Win32 with Direct3D 11 and DirectWrite. Viva loads
 the system libraries at runtime and bundles none of them.
 
-The current release is `v0.1.3`; name it explicitly (`@v0.1.3`) to pin it. Guides,
+The current release is `v0.2.1`; name it explicitly (`@v0.2.1`) to pin it. Guides,
 the API reference, and a component catalog with live previews live in
 [`website/`](website/); run it with `npm run dev` there, or read them on
 [vivaui.dev](https://vivaui.dev/en/), which is also available in
@@ -98,6 +100,8 @@ WebView and no bundled rendering runtime.
   menu (NSMenu, a Win32 popup menu, `com.canonical.dbusmenu`); `WindowPanel` is
   the borderless popup that opens beside it and closes when it loses focus;
   `Window.Hide`/`Show` keep an application running without a visible window.
+- `Application.SetDockBadge` puts a label in the red badge macOS draws at the
+  corner of the application's Dock tile, and an empty label removes it.
 - `app.StoreSecret`/`LoadSecret`/`DeleteSecret` keep a small secret in the
   system's own store (Keychain, Credential Manager, Secret Service).
 - `ui.MonoFamily` draws fixed-pitch text in any installed family and
